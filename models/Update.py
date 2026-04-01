@@ -56,9 +56,13 @@ class LocalUpdate(object):
                                100. * batch_idx / len(self.ldr_train), loss.item()))
                 batch_loss.append(loss.item())
                 if self.args.verbose and (batch_idx + 1) % self.args.train_acc_batches == 0:
-                    thresholds = []
-                    for value in net.module.threshold.values():
-                        thresholds = thresholds + [round(value.item(), 2)]
-                    print('Epoch: {}, batch {}, threshold {}, leak {}, timesteps {}'.format(iter, batch_idx + 1, thresholds, net.module.leak.item(), net.module.timesteps))
+                    net_base = net.module if isinstance(net, nn.DataParallel) else net
+                    if hasattr(net_base, 'threshold'):
+                        thresholds = [round(v.item(), 2) for v in net_base.threshold.values()]
+                        leak = net_base.leak.item() if hasattr(net_base, 'leak') else None
+                        timesteps = net_base.timesteps if hasattr(net_base, 'timesteps') else None
+                        print('Epoch: {}, batch {}, threshold {}, leak {}, timesteps {}'.format(
+                            iter, batch_idx + 1, thresholds, leak, timesteps
+                        ))
             epoch_loss.append(sum(batch_loss)/len(batch_loss))
         return net.state_dict(), sum(epoch_loss) / len(epoch_loss)

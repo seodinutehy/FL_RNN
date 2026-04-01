@@ -30,14 +30,37 @@ import json
 
 from PIL import Image
 
-from pysnn.datasets import nmnist_train_test
+
 
 if __name__ == '__main__':
     # parse args
     args = args_parser()
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
-    args.device = torch.device('cuda:{}'.format(args.gpu) if torch.cuda.is_available() and args.gpu != -1 else 'cpu')
+
+    # Device setup (important for multi-GPU environments like Kaggle)
+    # Keep model weights and all tensors consistently on the same CUDA device.
+    if torch.cuda.is_available() and args.gpu != -1:
+        torch.cuda.set_device(args.gpu)
+        args.device = torch.device(f'cuda:{args.gpu}')
+    else:
+        args.device = torch.device('cpu')
+
+    def _maybe_data_parallel(model: nn.Module) -> nn.Module:
+        """Wrap with DataParallel safely.
+
+        - If multiple GPUs exist and args.gpu==0: use all GPUs (default behavior).
+        - If multiple GPUs exist and args.gpu!=0: restrict DP to the chosen GPU to
+          avoid cuda:0 vs cuda:1 mismatches.
+        """
+        if args.device.type != 'cuda':
+            return model
+        if torch.cuda.device_count() <= 1:
+            return model
+        if args.gpu == 0:
+            return nn.DataParallel(model)
+        return nn.DataParallel(model, device_ids=[args.gpu], output_device=args.gpu)
+
     if args.device.type == 'cuda':
         torch.backends.cudnn.deterministic = True
         torch.backends.cudnn.benchmark = False
@@ -63,6 +86,7 @@ if __name__ == '__main__':
         else:
             dict_users = cifar_non_iid(dataset_train, args.num_classes, args.num_users)
     elif args.dataset == 'N-MNIST':
+        from pysnn.datasets import nmnist_train_test
         dataset_train, dataset_test = nmnist_train_test("nmnist/data")
         if args.iid:
             dict_users = nmnist_iid(dataset_train, args.num_users)
@@ -95,8 +119,7 @@ if __name__ == '__main__':
     if args.pretrained_model:
         net_glob.load_state_dict(torch.load(args.pretrained_model, map_location='cpu'))
 
-    if args.device.type == 'cuda':
-        net_glob = nn.DataParallel(net_glob)
+    net_glob = _maybe_data_parallel(net_glob)
     # training
     loss_train_list = []
     cv_loss, cv_acc = [], []
@@ -149,7 +172,7 @@ if __name__ == '__main__':
             net_glob_base = net_glob.module if isinstance(net_glob, nn.DataParallel) else net_glob
             model_copy = type(net_glob_base)(**model_args) # get a new instance
             if isinstance(net_glob, nn.DataParallel):
-                model_copy = nn.DataParallel(model_copy)
+                model_copy = _maybe_data_parallel(model_copy)
             model_copy.load_state_dict(net_glob.state_dict()) # copy weights and stuff
             w, loss = local.train(net=model_copy.to(args.device))
             w_locals_all.append(copy.deepcopy(w))
